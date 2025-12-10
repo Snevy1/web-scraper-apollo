@@ -15,7 +15,7 @@ log.debug('Setting up crawler.');
 const EMAIL: string = process.env.APOLLO_EMAIL ?? "";
 const PASSWORD: string = process.env.APOLLO_PASS ?? "";
 const LOGIN_URL = 'https://app.apollo.io/#/login?locale=en'; 
-const TARGET_PEOPLE_URL_BASE = "https://app.apollo.io/#/people?sortAscending=false&sortByField=recommendations_score&contactLabelIds[]=6931d8f3d25a7e000db60102&prospectedByCurrentTeam[]=yes&recommendationConfigId=score";
+const TARGET_PEOPLE_URL_BASE = "https://app.apollo.io/#/people?page=1&contactEmailStatusV2[]=verified&personTitles[]=Realtor&personTitles[]=realtor%20sales%20associate&personTitles[]=General%20contractor&personTitles[]=Property%20Manager&personTitles[]=Regional%20Property%20Manager&personTitles[]=Senior%20Property%20Manager&personTitles[]=Facilities%20Manager&personTitles[]=Construction%20Project%20Manager&personTitles[]=Construction%20Operations%20Manager&personTitles[]=Site%20Manager&personTitles[]=Construction%20Manager&personTitles[]=Real%20Estate%20Agent&personTitles[]=Real%20Estate%20Broker&personTitles[]=Property%20Consultant&personTitles[]=Building%20Manager&personLocations[]=Chicago%2C%20Illinois&uniqueUrlId=6T2aQ80Zqm&sortAscending=false&sortByField=recommendations_score&recommendationConfigId=score";
 const REPORT_EMAIL = process.env.REPORT_EMAIL;
 const CCREPORT_EMAIL = process.env.CCREPORT_EMAIL
 
@@ -112,202 +112,297 @@ async function handlePreScrapeChecks(page: any, log: any) {
 
 
 
- async function scrapeCurrentPage(page: any, log: any): Promise<void> {
-    log.info('Scraping current page...');
+ 
 
-    const T = SELECTORS.table;
-    let rows: any[] = [];
-
-    // Step 1: Find data rows using priority selectors
-    for (const selector of T.rowSelectors) {
-        try {
-            const candidates = await page.$$(selector);
-            if (candidates.length > 0) {
-                const firstRowCells = await candidates[0].$$(T.cell);
-                if (firstRowCells.length >= 2) { // just check >1
-                    rows = candidates;
-                    log.info(`Found ${rows.length} rows using selector: ${selector}`);
-                    break;
-                }
-            }
-        } catch (e) {
-            // Silent – try next selector
-        }
+// Utility helpers with fallback support
+// Utility: find the first matching single element from a list of selectors
+const findElement = async (scope: any, selectors: string[]): Promise<any | null> => {
+  for (const sel of selectors) {
+    try {
+      const el = await scope.$(sel);
+      if (el) return el;
+    } catch {
+      // try next
     }
-
-    if (rows.length === 0) {
-        log.warning('No data rows found on this page');
-        return;
-    }
-
-    const normalizeHeader = (text: string): string => {
-  return text.toLowerCase()
-    .replace(/\s*·\s*/g, '_')         // handle dot separators
-    .replace(/\s+/g, '_')             // spaces to underscores
-    .replace(/[^a-z0-9_]/g, '');      // remove special chars
+  }
+  return null;
 };
 
-    const headers = await page.$$eval('div[role="columnheader"]', ths =>
-  ths.map(th => th.textContent?.trim() || '')
-);
-
-const headerMap: Record<string, number> = {};
-headers.forEach((h:any, idx:any) => {
-  const normalized = normalizeHeader(h);
-  headerMap[normalized] = idx;
-});
-
-    const pageData: any[] = [];
-
-    // Step 3: Loop through each row
-    for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        await randomDelay(100, 400);
-
-        try {
-            const cells = await row.$$(T.cell);
-            if (cells.length < headers.length) continue;
-
-            // Helper functions
-            const getText = async (cell: any, selector: string): Promise<string | null> => {
-                try {
-                    const el = await cell.$(selector);
-                    if (!el) return null;
-                    const text = await el.textContent();
-                    return text?.trim() || null;
-                } catch {
-                    return null;
-                }
-            };
-
-            const getAttr = async (cell: any, selector: string, attr: string): Promise<string | null> => {
-                try {
-                    const el = await cell.$(selector);
-                    return el ? await el.getAttribute(attr) : null;
-                } catch {
-                    return null;
-                }
-            };
-
-            // Use headerMap instead of fixed indexes
-            const nameCell = cells[headerMap['name']] || cells[1] ;
-            const titleCell = cells[headerMap['job_title']] ||  cells[2];
-            const companyCell = cells[headerMap['company']] || cells[3];
-            const emailCell = cells[headerMap['emails']] || cells[4]
-            const phoneCell = cells[headerMap['phone_numbers']] ||  cells[5];
-            const locationCell = cells[headerMap['location']] || cells[9];
-            const empCountCell = cells[headerMap['company_number_of_employees']] || cells[10];
-            const linkedInCell = cells[headerMap['links']]; // optional
-            const nicheCell = cells[headerMap['company_industries']]; // optional
-            const keywordsCell = cells[headerMap['company_keywords']];
-            // Name
-            let fullNameRaw = 'N/A';
-            if (nameCell) {
-                const nameAnchor = await nameCell.$('a[data-to*="/contacts/"]');
-                const rawTextWithNoise = nameAnchor ? (await nameAnchor.innerText()) : '';
-                fullNameRaw = rawTextWithNoise
-                    .replace(/[-—]{2,}\s?/, '')
-                    .replace(/View more options to select rows/g, '')
-                    .trim();
-            }
-            const nameParts = fullNameRaw.split(' ').filter(Boolean);
-            const firstName = nameParts[0] || 'N/A';
-            const lastName = nameParts.slice(1).join(' ') || 'N/A';
-
-            // Job Title
-            const jobTitle = titleCell ? (await getText(titleCell, T.jobTitle)) || 'N/A' : 'N/A';
-
-            // Company
-            const companyName = companyCell ? (await getText(companyCell, T.companyName)) || 'N/A' : 'N/A';
-
-            // Email
-            let personalEmail = 'N/A';
-            if (emailCell) {
-                const emailText = await getText(emailCell, T.email);
-                const accessBtn = await emailCell.$(T.emailRequiresAccess);
-                if (accessBtn && (await accessBtn.isVisible?.())) {
-                    personalEmail = 'Requires Access';
-                } else if (emailText && !emailText.toLowerCase().includes('no email')) {
-                    personalEmail = emailText;
-                } else if (emailText?.toLowerCase().includes('no email')) {
-                    personalEmail = 'No email';
-                }
-            }
-
-            // Phone
-            let phoneNumber = 'N/A';
-            if (phoneCell) {
-                const requestLink = await phoneCell.$(T.phoneRequestLink);
-                if (requestLink && (await requestLink.isVisible?.())) {
-                    phoneNumber = 'Requires Access';
-                } else {
-                    const visiblePhone = await getText(phoneCell, T.phoneVisible);
-                    if (visiblePhone && visiblePhone !== 'Request phone number') {
-                        phoneNumber = visiblePhone;
-                    }
-                }
-            }
-
-            // LinkedIn
-            let linkedInUrl = 'N/A';
-            if (linkedInCell) {
-                const liLink = await linkedInCell.$(T.linkedIn);
-                if (liLink) {
-                    linkedInUrl = (await getAttr(linkedInCell, T.linkedIn, 'href')) || 'N/A';
-                }
-            }
-
-            // Location
-            const location = locationCell ? (await getText(locationCell, T.location)) || 'N/A' : 'N/A';
-
-            // Employee Count
-            const employeeCount = empCountCell ? (await getText(empCountCell, T.employeeCount)) || 'N/A' : 'N/A';
-
-            // Niche Tags
-            let niche = 'N/A';
-            if (nicheCell) {
-                const nicheElements = await nicheCell.$$(T.nicheTags);
-                const niches: string[] = [];
-                for (const el of nicheElements) {
-                    const text = await el.textContent();
-                    const trimmed = text?.trim();
-                    if (trimmed && !trimmed.startsWith('+') && trimmed.length > 1) {
-                        niches.push(trimmed);
-                    }
-                }
-                niche = niches.length > 0 ? niches.join(', ') : 'N/A';
-            }
-
-            // Build record
-            const record = {
-                'First Name': firstName,
-                'Last Name': lastName,
-                'Full Name': fullNameRaw,
-                'Job Title': jobTitle,
-                'Company': companyName,
-                'Personal Email': personalEmail,
-                'Phone': phoneNumber,
-                'LinkedIn Profile': linkedInUrl,
-                'Location': location,
-                'Employee Count': employeeCount,
-                'Industry/Niche': niche,
-            };
-
-            pageData.push(record);
-            log.info(`Row ${i + 1} – ${firstName} ${lastName} – ${jobTitle} @ ${companyName}`);
-
-        } catch (err: any) {
-            log.warning(`Failed to scrape row ${i + 1}: ${err.message || err}`);
-        }
+// Utility: find the first selector that yields one or more elements (for $$)
+const findElements = async (scope: any, selectors: string[]): Promise<any[]> => {
+  for (const sel of selectors) {
+    try {
+      const els = await scope.$$(sel);
+      if (els && els.length > 0) return els;
+    } catch {
+      // try next
     }
+  }
+  return [];
+};
 
-    // Step 4: Save data
-    if (pageData.length > 0) {
-        await Dataset.pushData(pageData);
-        log.info(`Successfully scraped and saved ${pageData.length} contacts from this page`);
-    } else {
-        log.warning('No contacts were scraped on this page');
-    }}
+// Text with fallback across multiple selectors
+const getTextWithFallback = async (scope: any, selectors: string[]): Promise<string | null> => {
+  const el = await findElement(scope, selectors);
+  if (!el) return null;
+  try {
+    const text = await el.textContent();
+    return text?.trim() || null;
+  } catch {
+    return null;
+  }
+};
+
+// Attribute with fallback across multiple selectors
+const getAttrWithFallback = async (
+  scope: any,
+  selectors: string[],
+  attr: string
+): Promise<string | null> => {
+  const el = await findElement(scope, selectors);
+  if (!el) return null;
+  try {
+    const val = await el.getAttribute(attr);
+    return val || null;
+  } catch {
+    return null;
+  }
+};
+
+// Small jitter to reduce rate of interactions
+
+
+export async function scrapeCurrentPage(page: any, log: any): Promise<void> {
+  log.info('Scraping current page...');
+
+  const T = SELECTORS.table;
+  let rows: any[] = [];
+
+  // 1) Find data rows using priority selectors
+  for (const rowSel of T.rowSelectors) {
+    try {
+      const candidates = await page.$$(rowSel);
+      if (candidates.length > 0) {
+        // T.cell is an array: find the first cell selector that yields cells
+        const firstRowCells = await findElements(candidates[0], Array.isArray(T.cell) ? T.cell : [T.cell as unknown as string]);
+        if (firstRowCells.length >= 2) {
+          rows = candidates;
+          log.info(`Found ${rows.length} rows using selector: ${rowSel}`);
+          break;
+        }
+      }
+    } catch {
+      // try next selector
+    }
+  }
+
+  if (rows.length === 0) {
+    log.warning('No data rows found on this page');
+    return;
+  }
+
+  const normalizeHeader = (text: string): string =>
+    text
+      .toLowerCase()
+      .replace(/\s*·\s*/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/[^a-z0-9_]/g, '');
+
+  const headers = await page.$$eval('div[role="columnheader"]', ths =>
+    ths.map(th => th.textContent?.trim() || '')
+  );
+
+  const headerMap: Record<string, number> = {};
+  headers.forEach((h: string, idx: number) => {
+    headerMap[normalizeHeader(h)] = idx;
+  });
+
+  const pageData: any[] = [];
+
+  // 3) Iterate rows
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    await randomDelay(100, 400);
+
+    try {
+      const cells = await findElements(row, Array.isArray(T.cell) ? T.cell : [T.cell as unknown as string]);
+      if (cells.length < headers.length) continue;
+
+      // Resolve cells with headerMap + index fallbacks
+      const nameCell = cells[headerMap['name']] || cells[1];
+      const titleCell = cells[headerMap['job_title']] || cells[2];
+      const companyCell = cells[headerMap['company']] || cells[3];
+      const emailCell = cells[headerMap['emails']] || cells[4];
+      const phoneCell = cells[headerMap['phone_numbers']] || cells[5];
+      const locationCell = cells[headerMap['location']] || cells[9];
+      const empCountCell = cells[headerMap['company_number_of_employees']] || cells[10];
+      const linkedInCell = cells[headerMap['links']];
+      const nicheCell = cells[headerMap['company_industries']];
+      const keywordsCell = cells[headerMap['company_keywords']];
+
+      // Name
+      let fullNameRaw = 'N/A';
+      if (nameCell) {
+        const nameText = await getTextWithFallback(
+          nameCell,
+          [
+            ...(Array.isArray(T.name) ? T.name : [T.name as unknown as string]),
+            ...(Array.isArray(SELECTORS.fallback.table.name) ? SELECTORS.fallback.table.name : [SELECTORS.fallback.table.name as unknown as string]),
+          ]
+        );
+        if (nameText) {
+          fullNameRaw = nameText
+            .replace(/[-—]{2,}\s?/, '')
+            .replace(/View more options to select rows/g, '')
+            .trim();
+        }
+      }
+      const nameParts = fullNameRaw.split(' ').filter(Boolean);
+      const firstName = nameParts[0] || 'N/A';
+      const lastName = nameParts.slice(1).join(' ') || 'N/A';
+
+      // Job Title
+      const jobTitle = titleCell
+        ? (await getTextWithFallback(titleCell, Array.isArray(T.jobTitle) ? T.jobTitle : [T.jobTitle as unknown as string])) || 'N/A'
+        : 'N/A';
+
+      // Company
+      const companyName = companyCell
+        ? (await getTextWithFallback(
+            companyCell,
+            [
+              ...(Array.isArray(T.companyName) ? T.companyName : [T.companyName as unknown as string]),
+              ...(Array.isArray(SELECTORS.fallback.table.company) ? SELECTORS.fallback.table.company : [SELECTORS.fallback.table.company as unknown as string]),
+            ]
+          )) || 'N/A'
+        : 'N/A';
+
+      // Email
+      let personalEmail = 'N/A';
+      if (emailCell) {
+        const emailText = await getTextWithFallback(
+          emailCell,
+          [
+            ...(Array.isArray(T.email) ? T.email : [T.email as unknown as string]),
+            ...(Array.isArray(SELECTORS.fallback.table.email) ? SELECTORS.fallback.table.email : [SELECTORS.fallback.table.email as unknown as string]),
+          ]
+        );
+
+        const accessBtn = await findElement(
+          emailCell,
+          Array.isArray(T.emailRequiresAccess) ? T.emailRequiresAccess : [T.emailRequiresAccess as unknown as string]
+        );
+
+        if (accessBtn && (await accessBtn.isVisible?.())) {
+          personalEmail = 'Requires Access';
+        } else if (emailText && !emailText.toLowerCase().includes('no email')) {
+          personalEmail = emailText;
+        } else if (emailText?.toLowerCase().includes('no email')) {
+          personalEmail = 'No email';
+        }
+      }
+
+      // Phone
+      let phoneNumber = 'N/A';
+      if (phoneCell) {
+        const requestLink = await findElement(
+          phoneCell,
+          Array.isArray(T.phoneRequestLink) ? T.phoneRequestLink : [T.phoneRequestLink as unknown as string]
+        );
+
+        if (requestLink && (await requestLink.isVisible?.())) {
+          phoneNumber = 'Requires Access';
+        } else {
+          const visiblePhone = await getTextWithFallback(
+            phoneCell,
+            [
+              ...(Array.isArray(T.phoneVisible) ? T.phoneVisible : [T.phoneVisible as unknown as string]),
+              ...(Array.isArray(SELECTORS.fallback.table.phone) ? SELECTORS.fallback.table.phone : [SELECTORS.fallback.table.phone as unknown as string]),
+            ]
+          );
+          if (visiblePhone && visiblePhone !== 'Request phone number') {
+            phoneNumber = visiblePhone;
+          }
+        }
+      }
+
+      // LinkedIn
+      let linkedInUrl = 'N/A';
+      if (linkedInCell) {
+        linkedInUrl =
+          (await getAttrWithFallback(
+            linkedInCell,
+            Array.isArray(T.linkedIn) ? T.linkedIn : [T.linkedIn as unknown as string],
+            'href'
+          )) || 'N/A';
+      }
+
+      // Location
+      const location = locationCell
+        ? (await getTextWithFallback(
+            locationCell,
+            [
+              ...(Array.isArray(T.location) ? T.location : [T.location as unknown as string]),
+              ...(Array.isArray(SELECTORS.fallback.table.location) ? SELECTORS.fallback.table.location : [SELECTORS.fallback.table.location as unknown as string]),
+            ]
+          )) || 'N/A'
+        : 'N/A';
+
+      // Employee Count
+      const employeeCount = empCountCell
+        ? (await getTextWithFallback(
+            empCountCell,
+            Array.isArray(T.employeeCount) ? T.employeeCount : [T.employeeCount as unknown as string]
+          )) || 'N/A'
+        : 'N/A';
+
+      // Niche Tags
+      let niche = 'N/A';
+      if (nicheCell) {
+        const nicheEls = await findElements(
+          nicheCell,
+          Array.isArray(T.nicheTags) ? T.nicheTags : [T.nicheTags as unknown as string]
+        );
+        const niches: string[] = [];
+        for (const el of nicheEls) {
+          const text = await el.textContent();
+          const trimmed = text?.trim();
+          if (trimmed && !trimmed.startsWith('+') && trimmed.length > 1) {
+            niches.push(trimmed);
+          }
+        }
+        niche = niches.length > 0 ? niches.join(', ') : 'N/A';
+      }
+
+      const record = {
+        'First Name': firstName,
+        'Last Name': lastName,
+        'Full Name': fullNameRaw,
+        'Job Title': jobTitle,
+        'Company': companyName,
+        'Personal Email': personalEmail,
+        'Phone': phoneNumber,
+        'LinkedIn Profile': linkedInUrl,
+        'Location': location,
+        'Employee Count': employeeCount,
+        'Industry/Niche': niche,
+      };
+
+      pageData.push(record);
+      log.info(`Row ${i + 1} – ${firstName} ${lastName} – ${jobTitle} @ ${companyName}`);
+    } catch (err: any) {
+      log.warning(`Failed to scrape row ${i + 1}: ${err.message || err}`);
+    }
+  }
+
+  // 4) Save data
+  if (pageData.length > 0) {
+    await Dataset.pushData(pageData);
+    log.info(`Successfully scraped and saved ${pageData.length} contacts from this page`);
+  } else {
+    log.warning('No contacts were scraped on this page');
+  }
+}
 
 
 // =============================
