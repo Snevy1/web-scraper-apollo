@@ -107,7 +107,12 @@ async function handlePreScrapeChecks(page: any, log: any) {
 // =============================
 // SCRAPING LOGIC
 // =============================
-async function scrapeCurrentPage(page: any, log: any): Promise<void> {
+
+ 
+
+
+
+ async function scrapeCurrentPage(page: any, log: any): Promise<void> {
     log.info('Scraping current page...');
 
     const T = SELECTORS.table;
@@ -147,7 +152,7 @@ async function scrapeCurrentPage(page: any, log: any): Promise<void> {
 );
 
 const headerMap: Record<string, number> = {};
-headers.forEach((h, idx) => {
+headers.forEach((h:any, idx:any) => {
   const normalized = normalizeHeader(h);
   headerMap[normalized] = idx;
 });
@@ -185,17 +190,16 @@ headers.forEach((h, idx) => {
             };
 
             // Use headerMap instead of fixed indexes
-            const nameCell = cells[headerMap['name']];
-            const titleCell = cells[headerMap['job_title']];
-            const companyCell = cells[headerMap['company']];
-            const emailCell = cells[headerMap['emails']];
-            const phoneCell = cells[headerMap['phone_numbers']];
-            const locationCell = cells[headerMap['location']];
-            const empCountCell = cells[headerMap['company_number_of_employees']];
+            const nameCell = cells[headerMap['name']] || cells[1] ;
+            const titleCell = cells[headerMap['job_title']] ||  cells[2];
+            const companyCell = cells[headerMap['company']] || cells[3];
+            const emailCell = cells[headerMap['emails']] || cells[4]
+            const phoneCell = cells[headerMap['phone_numbers']] ||  cells[5];
+            const locationCell = cells[headerMap['location']] || cells[9];
+            const empCountCell = cells[headerMap['company_number_of_employees']] || cells[10];
             const linkedInCell = cells[headerMap['links']]; // optional
             const nicheCell = cells[headerMap['company_industries']]; // optional
             const keywordsCell = cells[headerMap['company_keywords']];
-
             // Name
             let fullNameRaw = 'N/A';
             if (nameCell) {
@@ -303,8 +307,8 @@ headers.forEach((h, idx) => {
         log.info(`Successfully scraped and saved ${pageData.length} contacts from this page`);
     } else {
         log.warning('No contacts were scraped on this page');
-    }
-}
+    }}
+
 
 // =============================
 // PERSISTENCE SETUP
