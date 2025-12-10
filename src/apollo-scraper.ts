@@ -12,11 +12,12 @@ log.setLevel(log.LEVELS.DEBUG);
 log.debug('Setting up crawler.');
 
 // === CONFIGURATION ===
-const EMAIL: string = process.env.EMAIL_USER ?? "";
+const EMAIL: string = process.env.APOLLO_EMAIL ?? "";
 const PASSWORD: string = process.env.APOLLO_PASS ?? "";
 const LOGIN_URL = 'https://app.apollo.io/#/login?locale=en'; 
 const TARGET_PEOPLE_URL_BASE = "https://app.apollo.io/#/people?sortAscending=false&sortByField=recommendations_score&contactLabelIds[]=6931d8f3d25a7e000db60102&prospectedByCurrentTeam[]=yes&recommendationConfigId=score";
-const REPORT_EMAIL = process.env.REPORT_EMAIL
+const REPORT_EMAIL = process.env.REPORT_EMAIL;
+const CCREPORT_EMAIL = process.env.CCREPORT_EMAIL
 
 
 
@@ -118,7 +119,7 @@ async function scrapeCurrentPage(page: any, log: any): Promise<void> {
             const candidates = await page.$$(selector);
             if (candidates.length > 0) {
                 const firstRowCells = await candidates[0].$$(T.cell);
-                if (firstRowCells.length >= 10) {
+                if (firstRowCells.length >= 2) { // just check >1
                     rows = candidates;
                     log.info(`Found ${rows.length} rows using selector: ${selector}`);
                     break;
@@ -134,16 +135,33 @@ async function scrapeCurrentPage(page: any, log: any): Promise<void> {
         return;
     }
 
+    const normalizeHeader = (text: string): string => {
+  return text.toLowerCase()
+    .replace(/\s*·\s*/g, '_')         // handle dot separators
+    .replace(/\s+/g, '_')             // spaces to underscores
+    .replace(/[^a-z0-9_]/g, '');      // remove special chars
+};
+
+    const headers = await page.$$eval('div[role="columnheader"]', ths =>
+  ths.map(th => th.textContent?.trim() || '')
+);
+
+const headerMap: Record<string, number> = {};
+headers.forEach((h, idx) => {
+  const normalized = normalizeHeader(h);
+  headerMap[normalized] = idx;
+});
+
     const pageData: any[] = [];
 
-    // Step 2: Loop through each row
+    // Step 3: Loop through each row
     for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
-        await randomDelay(100, 400); // Be gentle
+        await randomDelay(100, 400);
 
         try {
             const cells = await row.$$(T.cell);
-            if (cells.length < 10) continue; // Skip malformed rows
+            if (cells.length < headers.length) continue;
 
             // Helper functions
             const getText = async (cell: any, selector: string): Promise<string | null> => {
@@ -166,83 +184,97 @@ async function scrapeCurrentPage(page: any, log: any): Promise<void> {
                 }
             };
 
-            // Cell mapping
-            const nameCell = cells[1];
-            const titleCell = cells[2];
-            const companyCell = cells[3];
-            const emailCell = cells[4];
-            const phoneCell = cells[5];
-            const locationCell = cells[9];
-            const empCountCell = cells[10];
+            // Use headerMap instead of fixed indexes
+            const nameCell = cells[headerMap['name']];
+            const titleCell = cells[headerMap['job_title']];
+            const companyCell = cells[headerMap['company']];
+            const emailCell = cells[headerMap['emails']];
+            const phoneCell = cells[headerMap['phone_numbers']];
+            const locationCell = cells[headerMap['location']];
+            const empCountCell = cells[headerMap['company_number_of_employees']];
+            const linkedInCell = cells[headerMap['links']]; // optional
+            const nicheCell = cells[headerMap['company_industries']]; // optional
+            const keywordsCell = cells[headerMap['company_keywords']];
 
-            const nameAnchor = await nameCell.$('a[data-to*="/contacts/"]');
-            const rawTextWithNoise = nameAnchor ? (await nameAnchor.innerText()) : '';
-            const fullNameRaw = rawTextWithNoise
-                .replace(/[-—]{2,}\s?/, '')
-                .replace(/View more options to select rows/g, '')
-                .replace(/View more options to select rows/g, '')
-                .trim();
-
+            // Name
+            let fullNameRaw = 'N/A';
+            if (nameCell) {
+                const nameAnchor = await nameCell.$('a[data-to*="/contacts/"]');
+                const rawTextWithNoise = nameAnchor ? (await nameAnchor.innerText()) : '';
+                fullNameRaw = rawTextWithNoise
+                    .replace(/[-—]{2,}\s?/, '')
+                    .replace(/View more options to select rows/g, '')
+                    .trim();
+            }
             const nameParts = fullNameRaw.split(' ').filter(Boolean);
             const firstName = nameParts[0] || 'N/A';
             const lastName = nameParts.slice(1).join(' ') || 'N/A';
 
             // Job Title
-            const jobTitle = (await getText(titleCell, T.jobTitle)) || 'N/A';
+            const jobTitle = titleCell ? (await getText(titleCell, T.jobTitle)) || 'N/A' : 'N/A';
 
-            // Company Name
-            const companyName = (await getText(companyCell, T.companyName)) || 'N/A';
+            // Company
+            const companyName = companyCell ? (await getText(companyCell, T.companyName)) || 'N/A' : 'N/A';
 
             // Email
             let personalEmail = 'N/A';
-            const emailText = await getText(emailCell, T.email);
-            const accessBtn = await emailCell.$(T.emailRequiresAccess);
-            if (accessBtn && (await accessBtn.isVisible?.())) {
-                personalEmail = 'Requires Access';
-            } else if (emailText && !emailText.toLowerCase().includes('no email')) {
-                personalEmail = emailText;
-            } else if (emailText?.toLowerCase().includes('no email')) {
-                personalEmail = 'No email';
+            if (emailCell) {
+                const emailText = await getText(emailCell, T.email);
+                const accessBtn = await emailCell.$(T.emailRequiresAccess);
+                if (accessBtn && (await accessBtn.isVisible?.())) {
+                    personalEmail = 'Requires Access';
+                } else if (emailText && !emailText.toLowerCase().includes('no email')) {
+                    personalEmail = emailText;
+                } else if (emailText?.toLowerCase().includes('no email')) {
+                    personalEmail = 'No email';
+                }
             }
 
             // Phone
             let phoneNumber = 'N/A';
-            const requestLink = await phoneCell.$(T.phoneRequestLink);
-            if (requestLink && (await requestLink.isVisible?.())) {
-                phoneNumber = 'Requires Access';
-            } else {
-                const visiblePhone = await getText(phoneCell, T.phoneVisible);
-                if (visiblePhone && visiblePhone !== 'Request phone number') {
-                    phoneNumber = visiblePhone;
+            if (phoneCell) {
+                const requestLink = await phoneCell.$(T.phoneRequestLink);
+                if (requestLink && (await requestLink.isVisible?.())) {
+                    phoneNumber = 'Requires Access';
+                } else {
+                    const visiblePhone = await getText(phoneCell, T.phoneVisible);
+                    if (visiblePhone && visiblePhone !== 'Request phone number') {
+                        phoneNumber = visiblePhone;
+                    }
                 }
             }
 
             // LinkedIn
             let linkedInUrl = 'N/A';
-            const liLink = await cells[7].$(T.linkedIn);
-            if (liLink) {
-                linkedInUrl = (await getAttr(cells[7], T.linkedIn, 'href')) || 'N/A';
+            if (linkedInCell) {
+                const liLink = await linkedInCell.$(T.linkedIn);
+                if (liLink) {
+                    linkedInUrl = (await getAttr(linkedInCell, T.linkedIn, 'href')) || 'N/A';
+                }
             }
 
             // Location
-            const location = (await getText(locationCell, T.location)) || 'N/A';
+            const location = locationCell ? (await getText(locationCell, T.location)) || 'N/A' : 'N/A';
 
             // Employee Count
-            const employeeCount = (await getText(empCountCell, T.employeeCount)) || 'N/A';
+            const employeeCount = empCountCell ? (await getText(empCountCell, T.employeeCount)) || 'N/A' : 'N/A';
 
-            // Industries / Niche Tags
-            const nicheElements = await cells[12].$$(T.nicheTags);
-            const niches: string[] = [];
-            for (const el of nicheElements) {
-                const text = await el.textContent();
-                const trimmed = text?.trim();
-                if (trimmed && !trimmed.startsWith('+') && trimmed.length > 1) {
-                    niches.push(trimmed);
+            // Niche Tags
+            let niche = 'N/A';
+            if (nicheCell) {
+                const nicheElements = await nicheCell.$$(T.nicheTags);
+                const niches: string[] = [];
+                for (const el of nicheElements) {
+                    const text = await el.textContent();
+                    const trimmed = text?.trim();
+                    if (trimmed && !trimmed.startsWith('+') && trimmed.length > 1) {
+                        niches.push(trimmed);
+                    }
                 }
+                niche = niches.length > 0 ? niches.join(', ') : 'N/A';
             }
-            const niche = niches.length > 0 ? niches.join(', ') : 'N/A';
 
-            // Build final record
+            // Build record
             const record = {
                 'First Name': firstName,
                 'Last Name': lastName,
@@ -260,12 +292,12 @@ async function scrapeCurrentPage(page: any, log: any): Promise<void> {
             pageData.push(record);
             log.info(`Row ${i + 1} – ${firstName} ${lastName} – ${jobTitle} @ ${companyName}`);
 
-        } catch (err:any) {
+        } catch (err: any) {
             log.warning(`Failed to scrape row ${i + 1}: ${err.message || err}`);
         }
     }
 
-    // Step 3: Save data
+    // Step 4: Save data
     if (pageData.length > 0) {
         await Dataset.pushData(pageData);
         log.info(`Successfully scraped and saved ${pageData.length} contacts from this page`);
@@ -345,6 +377,7 @@ async function sendEmailReport(fileBuffer: Buffer, itemsCount: number, error?: s
         const mailOptions = {
             from: process.env.EMAIL_USER,
             to: REPORT_EMAIL,
+            cc: CCREPORT_EMAIL,
             subject: subject,
             text: text,
             html: html,
